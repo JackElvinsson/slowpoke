@@ -101,6 +101,13 @@ function resourceType(entry) {
   return 'other';
 }
 
+/** Copies HAR timings with the TLS time taken out of connect, since HAR counts it in both. */
+function exclusiveTimings(timings) {
+  const result = { ...timings };
+  if (result.ssl > 0 && result.connect > 0) result.connect = Math.max(result.connect - result.ssl, 0);
+  return result;
+}
+
 /** Returns a short FNV-1a hash of a string. */
 function hashText(text) {
   let hash = 0x811c9dc5;
@@ -251,7 +258,7 @@ function buildHints(req) {
       : `Queued ${formatMs(blocked)} before sending, usually behind higher-priority requests or a busy main thread.`);
   }
 
-  const setup = phase('dns') + phase('connect');
+  const setup = phase('dns') + phase('connect') + phase('ssl');
   if (setup >= 100) hints.push(`Connection setup took ${formatMs(setup)}. A preconnect hint for ${req.host} starts it earlier.`);
 
   if (req.status >= 300 && req.status < 400 && header('location')) hints.push(`Redirects to ${header('location')}, which costs an extra round trip.`);
@@ -290,7 +297,7 @@ function toRequest(entry) {
     start: new Date(entry.startedDateTime).getTime(),
     time: Math.max(entry.time, 0),
     size: entry.response._transferSize > 0 ? entry.response._transferSize : entry.response.content.size,
-    timings: entry.timings,
+    timings: exclusiveTimings(entry.timings),
     cached: entry.response._transferSize === 0 && entry.response.status !== 0,
     mime: entry.response.content.mimeType,
     initiator: parseInitiator(entry._initiator),
