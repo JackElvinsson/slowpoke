@@ -34,6 +34,8 @@ const els = {
 const ROW_HEIGHT = 30;
 const OVERSCAN = 10;
 const BURST_MS = 1000;
+const MAX_FRAMES = 30;
+const SHOWN_FRAMES = 10;
 const SETTINGS_KEY = 'slowpoke:settings';
 const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.ignoreParams, els.onlySlow, els.onlyDupes, els.preserve, els.sort, els.view];
 
@@ -138,6 +140,56 @@ function recomputeKeys() {
   for (const req of requests) req.key = requestKey(req, ignored);
 }
 
+/** Collects the initiator's call frames, including async parent stacks, as file locations. */
+function parseInitiator(initiator) {
+  if (!initiator) return null;
+  const frames = [];
+  for (let stack = initiator.stack; stack; stack = stack.parent) {
+    for (const frame of stack.callFrames || []) {
+      if (frame.url) frames.push({ fn: frame.functionName, url: frame.url, line: frame.lineNumber ?? 0 });
+    }
+  }
+  if (!frames.length && initiator.url) frames.push({ fn: '', url: initiator.url, line: initiator.lineNumber ?? 0 });
+  return { type: initiator.type, frames: frames.slice(0, MAX_FRAMES) };
+}
+
+function frameId(frame) {
+  return `${frame.url}:${frame.line}:${frame.fn}`;
+}
+
+function frameLabel(frame) {
+  const url = new URL(frame.url, 'http://invalid');
+  const file = url.pathname.split('/').pop() || url.host;
+  return `${frame.fn ? `${frame.fn} @ ` : ''}${file}:${frame.line + 1}`;
+}
+
+/** Returns each run's caller: the first frame below the stack prefix that all runs in the group share. */
+function findCallers(runs) {
+  const stacks = runs.map((r) => r.initiator?.frames ?? []);
+  const withFrames = stacks.filter((frames) => frames.length);
+  if (!withFrames.length) return [];
+
+  let shared = 0;
+  while (withFrames.every((frames) => frames[shared] && frameId(frames[shared]) === frameId(withFrames[0][shared]))) shared++;
+
+  const callers = new Map();
+  for (const frames of withFrames) {
+    const frame = frames[shared] ?? frames[0];
+    const id = frameId(frame);
+    if (!callers.has(id)) callers.set(id, { frame, count: 0 });
+    callers.get(id).count++;
+  }
+  return [...callers.values()].sort((a, b) => b.count - a.count);
+}
+
+function openFrame(frame) {
+  chrome.devtools.panels.openResource(frame.url, frame.line);
+}
+
+function frameLink(frame) {
+  return h('button', { type: 'button', class: 'link', title: `${frame.url}:${frame.line + 1}`, onclick: () => openFrame(frame) }, frameLabel(frame));
+}
+
 function toRequest(entry) {
   const url = new URL(entry.request.url, 'http://invalid');
   const body = entry.request.postData?.text || '';
@@ -157,6 +209,7 @@ function toRequest(entry) {
     timings: entry.timings,
     cached: entry.response._transferSize === 0 && entry.response.status !== 0,
     mime: entry.response.content.mimeType,
+    initiator: parseInitiator(entry._initiator),
   };
   req.key = requestKey(req, ignoredParams());
   return req;
@@ -381,9 +434,17 @@ function buildSummary(req, groups) {
     ...PHASES.map(([key, label]) => `- ${label}: ${req.timings[key] > 0 ? formatMs(req.timings[key]) : '-'}`),
   ];
 
+  if (req.initiator) {
+    lines.push('', `Initiator (${req.initiator.type}):`);
+    if (!req.initiator.frames.length) lines.push('- no stack recorded');
+    req.initiator.frames.slice(0, SHOWN_FRAMES).forEach((frame) => lines.push(`- ${frame.fn || '(anonymous)'} ${frame.url}:${frame.line + 1}`));
+  }
+
   if (runs.length > 1) {
     lines.push('', `Called ${runs.length} times, combined time ${formatMs(total)}${burst ? `, burst of ${burstLabel(burst)}` : ''}:`);
     runs.forEach((r, i) => lines.push(`- Call ${i + 1}: ${r.status}, ${formatMs(r.time)}, at +${formatMs(r.start - runs[0].start)}`));
+    const callers = findCallers(runs);
+    if (callers.length) lines.push('Callers:', ...callers.map(({ frame, count }) => `- x${count} ${frame.fn || '(anonymous)'} ${frame.url}:${frame.line + 1}`));
   }
 
   return lines.filter((line) => line !== null).join('\n');
@@ -446,7 +507,8 @@ function buildListSummary(rows, groups) {
   for (const req of rows) {
     const { count, burst } = groups.get(req.key);
     const flags = [isSlow(req) && 'slow', count > 1 && `repeated x${count}`, burst && `burst of ${burstLabel(burst)}`].filter(Boolean);
-    lines.push(`- ${req.status} ${req.method} ${formatMs(req.time)} ${req.cached ? 'cache' : formatBytes(req.size)} ${req.url}${req.operation ? ` [${req.operation}]` : ''}${flags.length ? ` (${flags.join(', ')})` : ''}`);
+    const caller = req.initiator?.frames[0];
+    lines.push(`- ${req.status} ${req.method} ${formatMs(req.time)} ${req.cached ? 'cache' : formatBytes(req.size)} ${req.url}${req.operation ? ` [${req.operation}]` : ''}${caller ? ` from ${frameLabel(caller)}` : ''}${flags.length ? ` (${flags.join(', ')})` : ''}`);
   }
 
   return lines.join('\n');
@@ -463,6 +525,7 @@ function renderDetail(groups) {
   const phases = PHASES.map(([key, label, color]) => ({ label, color, value: Math.max(req.timings[key] ?? -1, 0) }));
   const phaseTotal = phases.reduce((sum, p) => sum + p.value, 0) || 1;
   const { runs, total, burst } = groups.get(req.key);
+  const callers = runs.length > 1 ? findCallers(runs) : [];
   const firstStart = runs[0].start;
 
   setChildren(
@@ -500,9 +563,21 @@ function renderDetail(groups) {
       h('strong', { class: 'v' }, formatMs(req.time)),
     ),
 
+    h('h4', {}, 'Initiated by'),
+    req.initiator?.frames.length
+      ? [
+        h('div', { class: 'muted' }, req.initiator.type),
+        req.initiator.frames.slice(0, SHOWN_FRAMES).map((frame) => h('div', { class: 'frame' }, frameLink(frame))),
+        req.initiator.frames.length > SHOWN_FRAMES && h('div', { class: 'muted' }, `+${req.initiator.frames.length - SHOWN_FRAMES} more frames`),
+      ]
+      : h('div', { class: 'muted' }, req.initiator ? `${req.initiator.type}, no stack recorded` : 'Not recorded'),
+
     runs.length > 1 && [
       h('h4', {}, `Called ${runs.length} times`),
       burst && h('div', { class: 'note burst' }, `Burst: ${burstLabel(burst)}`),
+      callers.length > 0 && h('div', { class: 'callers' },
+        callers.map(({ frame, count }) => h('div', { class: 'run' }, frameLink(frame), h('span', {}, `x${count}`))),
+      ),
       runs.map((r, i) =>
         h('div', { class: 'run' },
           h('span', {}, i === 0 ? 'First call' : `+${formatMs(r.start - firstStart)}`),

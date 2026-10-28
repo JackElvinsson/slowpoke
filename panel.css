@@ -266,6 +266,21 @@ button:hover { border-color: var(--accent); }
 .detail .actions { display: flex; gap: 6px; justify-content: flex-end; margin-bottom: 8px; }
 .detail .note { margin-bottom: 6px; font-weight: 600; }
 .detail .note.burst { color: var(--warn); }
+.detail .muted { color: var(--muted); }
+.detail .frame { padding: 1px 0; }
+.detail .callers { margin-bottom: 6px; }
+
+button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-align: left;
+  word-break: break-all;
+}
+button.link:hover { text-decoration: underline; }
 
 .phases {
   display: flex;
