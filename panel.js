@@ -26,6 +26,7 @@ const els = {
   onlyDupes: document.getElementById('onlyDupes'),
   preserve: document.getElementById('preserve'),
   sort: document.getElementById('sort'),
+  view: document.getElementById('view'),
   copyList: document.getElementById('copyList'),
   clear: document.getElementById('clear'),
 };
@@ -34,7 +35,7 @@ const ROW_HEIGHT = 30;
 const OVERSCAN = 10;
 const BURST_MS = 1000;
 const SETTINGS_KEY = 'slowpoke:settings';
-const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.ignoreParams, els.onlySlow, els.onlyDupes, els.preserve, els.sort];
+const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.ignoreParams, els.onlySlow, els.onlyDupes, els.preserve, els.sort, els.view];
 
 let requests = [];
 let nextId = 1;
@@ -42,12 +43,9 @@ let selectedId = null;
 let renderQueued = false;
 let rowsQueued = false;
 let hostSignature = '';
-let current = { rows: [], groups: new Map(), minStart: 0, span: 1 };
+let current = { rows: [], grouped: false, groups: new Map(), minStart: 0, span: 1 };
 
-const listHead = h('div', { class: 'head' },
-  h('span', {}, 'Status'), h('span', {}, 'Method'), h('span', {}, 'Request'),
-  h('span', { class: 'num' }, 'Size'), h('span', { class: 'num' }, 'Time'), h('span', {}, 'Waterfall'),
-);
+const listHead = h('div', { class: 'head' });
 const listRows = h('div', { class: 'rows' });
 els.list.append(listHead, listRows);
 
@@ -209,6 +207,10 @@ function buildGroups() {
     group.runs.sort((a, b) => a.start - b.start);
     group.count = group.runs.length;
     group.total = group.runs.reduce((sum, r) => sum + r.time, 0);
+    group.avg = group.total / group.count;
+    const times = group.runs.map((r) => r.time).sort((a, b) => a - b);
+    group.max = times.at(-1);
+    group.p95 = times[Math.ceil(times.length * 0.95) - 1];
     group.burst = findBurst(group.runs);
   }
   return groups;
@@ -237,6 +239,15 @@ function visibleRequests(groups) {
     rows = rows.sort((a, b) => a.start - b.start);
   }
   return rows;
+}
+
+/** Returns the groups that have at least one visible request, in the current sort order. */
+function visibleGroups(rows, groups) {
+  const list = [...new Set(rows.map((req) => req.key))].map((key) => groups.get(key));
+  const byStart = (a, b) => a.runs[0].start - b.runs[0].start;
+  if (els.sort.value === 'time') return list.sort((a, b) => b.total - a.total);
+  if (els.sort.value === 'count') return list.sort((a, b) => b.count - a.count || byStart(a, b));
+  return list.sort(byStart);
 }
 
 /** Rebuilds the host dropdown with request counts, keeping the current selection. */
@@ -321,6 +332,38 @@ function renderRow(req, groups, minStart, span) {
   );
 }
 
+/** Renders one row per group with its call count and time statistics. */
+function renderGroupRow(group) {
+  const last = group.runs.at(-1);
+  const slow = group.max >= thresholdFor(last);
+
+  return h(
+    'div',
+    {
+      class: `row${group.runs.some((r) => r.id === selectedId) ? ' selected' : ''}`,
+      title: last.url,
+      onclick: () => {
+        selectedId = last.id;
+        queueRender();
+      },
+    },
+    h('span', { class: `num calls${group.count > 1 ? ' dupe' : ''}` }, `x${group.count}`),
+    h('span', { class: 'method' }, last.method),
+    h(
+      'span',
+      { class: 'name' },
+      h('span', { class: 'path' }, last.path, ' ', h('span', { class: 'host' }, last.host)),
+      last.operation && h('span', { class: 'badge op' }, last.operation),
+      group.burst && h('span', { class: 'badge burst', title: burstLabel(group.burst) }, `${group.burst.count} in ${formatMs(group.burst.span)}`),
+      slow && h('span', { class: 'badge slow' }, 'slow'),
+    ),
+    h('span', { class: 'num' }, formatMs(group.avg)),
+    h('span', { class: 'num' }, formatMs(group.p95)),
+    h('span', { class: `num time ${slow ? 'slow' : ''}` }, formatMs(group.max)),
+    h('span', { class: 'num' }, formatMs(group.total)),
+  );
+}
+
 /** Builds a plain-text summary of a request, including its timing phases and repeated calls. */
 function buildSummary(req, groups) {
   const threshold = thresholdFor(req);
@@ -369,9 +412,10 @@ async function copyWithFeedback(button, text) {
   setTimeout(() => { button.textContent = button.dataset.label; }, 1500);
 }
 
-/** Builds a plain-text list of the given requests, with the active filters and sort order. */
+/** Builds a plain-text list of the given requests, or of their groups in grouped view, with the active filters and sort order. */
 function buildListSummary(rows, groups) {
-  const sortLabels = { start: 'start time', time: 'slowest first', count: 'most repeated' };
+  const grouped = els.view.value === 'grouped';
+  const sortLabels = { start: 'start time', time: grouped ? 'highest total time' : 'slowest first', count: 'most repeated' };
   const filters = [
     els.host.value && `host=${els.host.value}`,
     els.type.value && `type=${els.type.value}`,
@@ -389,6 +433,15 @@ function buildListSummary(rows, groups) {
     `Sorted by: ${sortLabels[els.sort.value]}`,
     '',
   ];
+
+  if (grouped) {
+    for (const group of visibleGroups(rows, groups)) {
+      const last = group.runs.at(-1);
+      const flags = [group.max >= thresholdFor(last) && 'slow', group.burst && `burst of ${burstLabel(group.burst)}`].filter(Boolean);
+      lines.push(`- x${group.count} ${last.method} avg ${formatMs(group.avg)}, p95 ${formatMs(group.p95)}, max ${formatMs(group.max)}, total ${formatMs(group.total)} ${last.url}${last.operation ? ` [${last.operation}]` : ''}${flags.length ? ` (${flags.join(', ')})` : ''}`);
+    }
+    return lines.join('\n');
+  }
 
   for (const req of rows) {
     const { count, burst } = groups.get(req.key);
@@ -480,22 +533,38 @@ function render() {
   renderHosts();
   renderThresholds();
 
+  const grouped = els.view.value === 'grouped';
   const rows = visibleRequests(groups);
   const shownTime = rows.reduce((sum, req) => sum + req.time, 0);
-  els.count.textContent = `Showing ${rows.length} of ${requests.length} requests, ${formatMs(shownTime)} total`;
+  const shownGroups = grouped ? visibleGroups(rows, groups) : null;
+  els.count.textContent = grouped
+    ? `Showing ${shownGroups.length} groups from ${rows.length} of ${requests.length} requests, ${formatMs(shownTime)} total`
+    : `Showing ${rows.length} of ${requests.length} requests, ${formatMs(shownTime)} total`;
   const minStart = requests.reduce((min, r) => Math.min(min, r.start), Infinity);
   const maxEnd = requests.reduce((max, r) => Math.max(max, r.start + r.time), 0);
   const span = Math.max(maxEnd - minStart, 1);
 
-  current = { rows, groups, minStart, span };
+  renderHead(grouped);
+  current = { rows: shownGroups || rows, grouped, groups, minStart, span };
   renderRows();
   renderDetail(groups);
+}
+
+/** Swaps the column headings between the request and grouped views. */
+function renderHead(grouped) {
+  if (els.list.classList.contains('grouped') === grouped && listHead.childElementCount) return;
+  els.list.classList.toggle('grouped', grouped);
+  setChildren(listHead, grouped
+    ? [h('span', { class: 'num' }, 'Calls'), h('span', {}, 'Method'), h('span', {}, 'Request'),
+      h('span', { class: 'num' }, 'Avg'), h('span', { class: 'num' }, 'p95'), h('span', { class: 'num' }, 'Max'), h('span', { class: 'num' }, 'Total')]
+    : [h('span', {}, 'Status'), h('span', {}, 'Method'), h('span', {}, 'Request'),
+      h('span', { class: 'num' }, 'Size'), h('span', { class: 'num' }, 'Time'), h('span', {}, 'Waterfall')]);
 }
 
 /** Renders the rows inside the scrolled viewport, plus a small overscan. */
 function renderRows() {
   rowsQueued = false;
-  const { rows, groups, minStart, span } = current;
+  const { rows, grouped, groups, minStart, span } = current;
 
   if (!rows.length) {
     listRows.style.height = '';
@@ -508,8 +577,8 @@ function renderRows() {
   const first = Math.max(Math.floor(offset / ROW_HEIGHT) - OVERSCAN, 0);
   const last = Math.min(Math.ceil((offset + els.list.clientHeight) / ROW_HEIGHT) + OVERSCAN, rows.length);
 
-  setChildren(listRows, rows.slice(first, last).map((req, i) => {
-    const row = renderRow(req, groups, minStart, span);
+  setChildren(listRows, rows.slice(first, last).map((item, i) => {
+    const row = grouped ? renderGroupRow(item) : renderRow(item, groups, minStart, span);
     row.style.top = `${(first + i) * ROW_HEIGHT}px`;
     return row;
   }));
@@ -585,7 +654,7 @@ els.clear.addEventListener('click', () => {
   queueRender();
 });
 
-for (const el of [els.search, els.host, els.type, els.threshold, ...Object.values(els.thresholds), els.onlySlow, els.onlyDupes, els.sort]) {
+for (const el of [els.search, els.host, els.type, els.threshold, ...Object.values(els.thresholds), els.onlySlow, els.onlyDupes, els.sort, els.view]) {
   el.addEventListener('input', queueRender);
 }
 

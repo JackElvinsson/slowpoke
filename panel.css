@@ -165,6 +165,10 @@ button:hover { border-color: var(--accent); }
   padding: 0 12px;
 }
 
+.list.grouped .head, .list.grouped .row {
+  grid-template-columns: 56px 60px minmax(160px, 1fr) 70px 70px 70px 80px;
+}
+
 .head {
   position: sticky;
   top: 0;
@@ -195,6 +199,7 @@ button:hover { border-color: var(--accent); }
 .status.s4, .status.s5, .status.s0 { color: var(--bad); }
 
 .method { color: var(--muted); }
+.calls.dupe { color: var(--dupe); font-weight: 600; }
 
 .name {
   display: flex;
