@@ -125,7 +125,7 @@ button:hover { border-color: var(--accent); }
   min-height: 0;
 }
 
-.list { flex: 1; overflow: auto; min-width: 0; }
+.list { position: relative; flex: 1; overflow: auto; min-width: 0; }
 
 .head, .row {
   display: grid;
@@ -146,7 +146,12 @@ button:hover { border-color: var(--accent); }
   font-weight: 600;
 }
 
+.rows { position: relative; }
+
 .row {
+  position: absolute;
+  left: 0;
+  right: 0;
   height: 30px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;

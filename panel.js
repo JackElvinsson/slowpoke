@@ -25,6 +25,8 @@ const els = {
   clear: document.getElementById('clear'),
 };
 
+const ROW_HEIGHT = 30;
+const OVERSCAN = 10;
 const SETTINGS_KEY = 'slowpoke:settings';
 const persisted = [els.type, els.threshold, els.onlySlow, els.onlyDupes, els.preserve, els.sort];
 
@@ -32,7 +34,16 @@ let requests = [];
 let nextId = 1;
 let selectedId = null;
 let renderQueued = false;
+let rowsQueued = false;
 let hostSignature = '';
+let current = { rows: [], counts: new Map(), minStart: 0, span: 1 };
+
+const listHead = h('div', { class: 'head' },
+  h('span', {}, 'Status'), h('span', {}, 'Method'), h('span', {}, 'Request'),
+  h('span', { class: 'num' }, 'Size'), h('span', { class: 'num' }, 'Time'), h('span', {}, 'Waterfall'),
+);
+const listRows = h('div', { class: 'rows' });
+els.list.append(listHead, listRows);
 
 /** Builds a DOM element without ever interpreting strings as HTML. */
 function h(tag, props = {}, ...children) {
@@ -368,28 +379,44 @@ function render() {
   const maxEnd = requests.reduce((max, r) => Math.max(max, r.start + r.time), 0);
   const span = Math.max(maxEnd - minStart, 1);
 
-  const head = h('div', { class: 'head' },
-    h('span', {}, 'Status'), h('span', {}, 'Method'), h('span', {}, 'Request'),
-    h('span', { class: 'num' }, 'Size'), h('span', { class: 'num' }, 'Time'), h('span', {}, 'Waterfall'),
-  );
-
-  const scrollTop = els.list.scrollTop;
-  setChildren(
-    els.list,
-    head,
-    rows.length
-      ? rows.map((req) => renderRow(req, counts, minStart, span))
-      : h('div', { class: 'empty' }, requests.length ? 'No requests match the current filters.' : 'Waiting for requests. Reload the page to capture everything.'),
-  );
-  els.list.scrollTop = scrollTop;
-
+  current = { rows, counts, minStart, span };
+  renderRows();
   renderDetail(counts);
+}
+
+/** Renders the rows inside the scrolled viewport, plus a small overscan. */
+function renderRows() {
+  rowsQueued = false;
+  const { rows, counts, minStart, span } = current;
+
+  if (!rows.length) {
+    listRows.style.height = '';
+    setChildren(listRows, h('div', { class: 'empty' }, requests.length ? 'No requests match the current filters.' : 'Waiting for requests. Reload the page to capture everything.'));
+    return;
+  }
+
+  listRows.style.height = `${rows.length * ROW_HEIGHT}px`;
+  const offset = Math.max(els.list.scrollTop - listRows.offsetTop, 0);
+  const first = Math.max(Math.floor(offset / ROW_HEIGHT) - OVERSCAN, 0);
+  const last = Math.min(Math.ceil((offset + els.list.clientHeight) / ROW_HEIGHT) + OVERSCAN, rows.length);
+
+  setChildren(listRows, rows.slice(first, last).map((req, i) => {
+    const row = renderRow(req, counts, minStart, span);
+    row.style.top = `${(first + i) * ROW_HEIGHT}px`;
+    return row;
+  }));
 }
 
 function queueRender() {
   if (renderQueued) return;
   renderQueued = true;
   requestAnimationFrame(render);
+}
+
+function queueRows() {
+  if (rowsQueued) return;
+  rowsQueued = true;
+  requestAnimationFrame(renderRows);
 }
 
 /** Restores the persisted toolbar settings from localStorage. */
@@ -448,6 +475,9 @@ els.clear.addEventListener('click', () => {
 for (const el of [els.search, els.host, els.type, els.threshold, els.onlySlow, els.onlyDupes, els.sort]) {
   el.addEventListener('input', queueRender);
 }
+
+els.list.addEventListener('scroll', queueRows);
+new ResizeObserver(queueRows).observe(els.list);
 
 for (const el of persisted) {
   el.addEventListener('input', saveSettings);
