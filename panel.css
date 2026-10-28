@@ -206,8 +206,11 @@ button:hover { border-color: var(--accent); }
   align-items: center;
   gap: 6px;
   min-width: 0;
+  overflow: hidden;
 }
 .name .path {
+  flex: 0 1 auto;
+  min-width: 80px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
