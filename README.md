@@ -17,6 +17,7 @@ After changing the code, click the reload icon on the extension card and reopen 
 - **Ignore params**: query params left out when matching repeats, for cache-busters like `_` or `ver`. Use `*` to ignore the whole query string.
 - **Bursts**: repeats that fire within 1 second of each other, such as a component fetching twice on mount.
 - **Grouped view**: one row per request with call count, average, p95, max and total time.
+- **Sorting**: click a column title to sort on it, and click again to reverse. The sort menu also has start time, latest first, slowest first and most repeated.
 - **Initiator**: the call stack that started the request, with links that open the source in the Sources panel. Repeated requests list their distinct callers.
 - **Server timing and cache**: `Server-Timing` metrics and the CDN or proxy cache result (`cf-cache-status`, `x-cache`, `x-cache-status`, `x-proxy-cache`, `x-litespeed-cache`, `x-vercel-cache`, `age`).
 - **Hints**: likely causes such as long server wait, queueing on HTTP/1.1, slow connection setup, redirects, missing compression, large payloads and static assets without cache headers.

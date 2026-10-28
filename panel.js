@@ -26,6 +26,7 @@ const els = {
   onlyDupes: document.getElementById('onlyDupes'),
   preserve: document.getElementById('preserve'),
   sort: document.getElementById('sort'),
+  sortCustom: document.getElementById('sortCustom'),
   view: document.getElementById('view'),
   saveBaseline: document.getElementById('saveBaseline'),
   clearBaseline: document.getElementById('clearBaseline'),
@@ -46,12 +47,47 @@ const BASELINE_KEY = 'slowpoke:baseline';
 const BASELINE_MIN_MS = 50;
 const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.ignoreParams, els.onlySlow, els.onlyDupes, els.preserve, els.sort, els.view];
 
+const SORT_PRESETS = {
+  start: { by: 'start', desc: false },
+  latest: { by: 'start', desc: true },
+  time: { by: 'time', desc: true },
+  count: { by: 'count', desc: true },
+};
+const SORT_LABELS = { start: 'start time', status: 'status', method: 'method', path: 'request', size: 'size', time: 'time', count: 'calls', avg: 'average time', p95: 'p95 time', max: 'max time' };
+const ASCENDING_FIRST = ['start', 'method', 'path'];
+const GROUP_STATS = ['count', 'avg', 'p95', 'max'];
+const REQUEST_SORT = {
+  start: (req) => req.start,
+  status: (req) => req.status,
+  method: (req) => req.method,
+  path: (req) => req.path,
+  size: (req) => req.size,
+  time: (req) => req.time,
+  count: (req, groups) => groups.get(req.key).count,
+  avg: (req, groups) => groups.get(req.key).avg,
+  p95: (req, groups) => groups.get(req.key).p95,
+  max: (req, groups) => groups.get(req.key).max,
+};
+const GROUP_SORT = {
+  start: (group) => group.runs[0].start,
+  status: (group) => group.runs.at(-1).status,
+  method: (group) => group.runs.at(-1).method,
+  path: (group) => group.runs.at(-1).path,
+  size: (group) => group.runs.at(-1).size,
+  time: (group) => group.total,
+  count: (group) => group.count,
+  avg: (group) => group.avg,
+  p95: (group) => group.p95,
+  max: (group) => group.max,
+};
+
 let requests = [];
 let nextId = 1;
 let selectedId = null;
 let renderQueued = false;
 let rowsQueued = false;
 let hostSignature = '';
+let headSignature = '';
 let baseline = null;
 let current = { rows: [], grouped: false, groups: new Map(), minStart: 0, span: 1 };
 
@@ -379,23 +415,64 @@ function visibleRequests(groups) {
     return true;
   });
 
-  if (els.sort.value === 'time') {
-    rows = rows.sort((a, b) => b.time - a.time);
-  } else if (els.sort.value === 'count') {
-    rows = rows.sort((a, b) => groups.get(b.key).count - groups.get(a.key).count || a.key.localeCompare(b.key) || a.start - b.start);
-  } else {
-    rows = rows.sort((a, b) => a.start - b.start);
-  }
-  return rows;
+  const byKey = GROUP_STATS.includes(currentSort().by) ? (a, b) => a.key.localeCompare(b.key) : undefined;
+  return sortItems(rows, REQUEST_SORT, groups, byKey);
 }
 
 /** Returns the groups that have at least one visible request, in the current sort order. */
 function visibleGroups(rows, groups) {
   const list = [...new Set(rows.map((req) => req.key))].map((key) => groups.get(key));
-  const byStart = (a, b) => a.runs[0].start - b.runs[0].start;
-  if (els.sort.value === 'time') return list.sort((a, b) => b.total - a.total);
-  if (els.sort.value === 'count') return list.sort((a, b) => b.count - a.count || byStart(a, b));
-  return list.sort(byStart);
+  return sortItems(list, GROUP_SORT, groups);
+}
+
+/** Parses a sort menu value into a column and direction. */
+function parseSort(value) {
+  if (SORT_PRESETS[value]) return SORT_PRESETS[value];
+  const [by, dir] = String(value).split(':');
+  return SORT_LABELS[by] ? { by, desc: dir === 'desc' } : SORT_PRESETS.start;
+}
+
+function currentSort() {
+  return parseSort(els.sort.value);
+}
+
+/** Selects the sort menu preset for a column and direction, or the custom option when none matches. */
+function setSort({ by, desc }) {
+  const preset = Object.keys(SORT_PRESETS).find((name) => SORT_PRESETS[name].by === by && SORT_PRESETS[name].desc === desc);
+  if (!preset) els.sortCustom.value = `${by}:${desc ? 'desc' : 'asc'}`;
+  els.sort.value = preset || els.sortCustom.value;
+}
+
+/** Sorts on a column, reversing the direction when it is already the active column. */
+function sortOnColumn(by) {
+  const sort = currentSort();
+  setSort({ by, desc: sort.by === by ? !sort.desc : !ASCENDING_FIRST.includes(by) });
+  saveSettings();
+  queueRender();
+}
+
+function compareValues(a, b) {
+  return typeof a === 'string' ? a.localeCompare(b) : a - b;
+}
+
+/** Sorts items in place on the active sort column, then by the optional tie breaker and start time. */
+function sortItems(items, accessors, groups, tie = () => 0) {
+  const { by, desc } = currentSort();
+  const value = accessors[by];
+  const dir = desc ? -1 : 1;
+  return items.sort((a, b) => dir * compareValues(value(a, groups), value(b, groups)) || tie(a, b) || accessors.start(a) - accessors.start(b));
+}
+
+function columnLabel(by, grouped) {
+  return by === 'time' && grouped ? 'total time' : SORT_LABELS[by];
+}
+
+/** Describes the active sort in words. */
+function sortLabel(grouped) {
+  const presets = { start: 'start time', latest: 'latest first', time: grouped ? 'highest total time' : 'slowest first', count: 'most repeated' };
+  if (presets[els.sort.value]) return presets[els.sort.value];
+  const { by, desc } = currentSort();
+  return `${columnLabel(by, grouped)}, ${desc ? 'descending' : 'ascending'}`;
 }
 
 function loadBaseline() {
@@ -691,7 +768,6 @@ async function copyWithFeedback(button, text) {
 /** Builds a plain-text list of the given requests, or of their groups in grouped view, with the active filters and sort order. */
 function buildListSummary(rows, groups) {
   const grouped = els.view.value === 'grouped';
-  const sortLabels = { start: 'start time', time: grouped ? 'highest total time' : 'slowest first', count: 'most repeated' };
   const filters = [
     els.host.value && `host=${els.host.value}`,
     els.type.value && `type=${els.type.value}`,
@@ -706,7 +782,7 @@ function buildListSummary(rows, groups) {
     `Network requests (showing ${rows.length} of ${requests.length}, ${formatMs(total)} total)`,
     `Filters: ${filters.length ? filters.join(', ') : 'none'}`,
     `Slow threshold: ${globalThreshold()} ms${overrides.length ? ` (${overrides.join(', ')})` : ''}`,
-    `Sorted by: ${sortLabels[els.sort.value]}`,
+    `Sorted by: ${sortLabel(grouped)}`,
     baseline ? `Compared to baseline of ${baseline.requests} requests saved ${new Date(baseline.savedAt).toISOString()}` : null,
     '',
   ].filter((line) => line !== null);
@@ -874,15 +950,27 @@ function render() {
   renderDetail(groups);
 }
 
-/** Swaps the column headings between the request and grouped views. */
+/** Renders the sortable column headings for the request or grouped view and the custom sort option label. */
 function renderHead(grouped) {
-  if (els.list.classList.contains('grouped') === grouped && listHead.childElementCount) return;
+  els.sortCustom.textContent = `Sort: ${sortLabel(grouped)}`;
+  const signature = `${grouped}|${els.sort.value}`;
+  if (signature === headSignature) return;
+  headSignature = signature;
   els.list.classList.toggle('grouped', grouped);
-  setChildren(listHead, grouped
-    ? [h('span', { class: 'num' }, 'Calls'), h('span', {}, 'Method'), h('span', {}, 'Request'),
-      h('span', { class: 'num' }, 'Avg'), h('span', { class: 'num' }, 'p95'), h('span', { class: 'num' }, 'Max'), h('span', { class: 'num' }, 'Total')]
-    : [h('span', {}, 'Status'), h('span', {}, 'Method'), h('span', {}, 'Request'),
-      h('span', { class: 'num' }, 'Size'), h('span', { class: 'num' }, 'Time'), h('span', {}, 'Waterfall')]);
+
+  const columns = grouped
+    ? [['count', 'Calls', 'num'], ['method', 'Method'], ['path', 'Request'], ['avg', 'Avg', 'num'], ['p95', 'p95', 'num'], ['max', 'Max', 'num'], ['time', 'Total', 'num']]
+    : [['status', 'Status'], ['method', 'Method'], ['path', 'Request'], ['size', 'Size', 'num'], ['time', 'Time', 'num'], ['start', 'Waterfall']];
+  const { by, desc } = currentSort();
+  setChildren(listHead, columns.map(([key, label, align = '']) => {
+    const direction = key === by ? (desc ? ' desc' : ' asc') : '';
+    return h('button', {
+      type: 'button',
+      class: `sort ${align}${direction}`,
+      title: `Sort by ${columnLabel(key, grouped)}`,
+      onclick: () => sortOnColumn(key),
+    }, label);
+  }));
 }
 
 /** Renders the rows inside the scrolled viewport, plus a small overscan. */
@@ -931,6 +1019,7 @@ function loadSettings() {
   for (const el of persisted) {
     if (!(el.id in saved)) continue;
     if (el.type === 'checkbox') el.checked = Boolean(saved[el.id]);
+    else if (el === els.sort) setSort(parseSort(saved[el.id]));
     else el.value = saved[el.id];
   }
 }
