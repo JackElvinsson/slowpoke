@@ -294,6 +294,7 @@ function toRequest(entry) {
     cached: entry.response._transferSize === 0 && entry.response.status !== 0,
     mime: entry.response.content.mimeType,
     initiator: parseInitiator(entry._initiator),
+    requestHeaders: entry.request.headers,
     responseHeaders,
     serverTiming: parseServerTiming(headerValues(responseHeaders, 'server-timing')),
     cache: parseCacheStatus(responseHeaders),
@@ -630,6 +631,28 @@ function buildSummary(req, groups) {
   return lines.filter((line) => line !== null).join('\n');
 }
 
+/** Builds a cURL command that repeats the request with its method, headers and body. */
+function buildCurl(req) {
+  const quote = (text) => `'${text.replace(/'/g, "'\\''")}'`;
+  const parts = [`curl ${quote(req.url)}`];
+  if (req.method !== 'GET' && !(req.method === 'POST' && req.body)) parts.push(`-X ${req.method}`);
+
+  let compressed = false;
+  for (const { name, value } of req.requestHeaders) {
+    const lower = name.toLowerCase();
+    if (lower.startsWith(':') || lower === 'content-length') continue;
+    if (lower === 'accept-encoding') {
+      compressed = true;
+      continue;
+    }
+    parts.push(`-H ${quote(`${name}: ${value}`)}`);
+  }
+
+  if (req.body) parts.push(`--data-raw ${quote(req.body)}`);
+  if (compressed) parts.push('--compressed');
+  return parts.join(' \\\n  ');
+}
+
 /** Copies text to the clipboard, using a hidden textarea when the Clipboard API is unavailable. */
 async function copyText(text) {
   try {
@@ -734,6 +757,10 @@ function renderDetail(groups) {
         type: 'button',
         onclick: (event) => copyWithFeedback(event.currentTarget, buildSummary(req, groups)),
       }, 'Copy for LLM'),
+      h('button', {
+        type: 'button',
+        onclick: (event) => copyWithFeedback(event.currentTarget, buildCurl(req)),
+      }, 'Copy as cURL'),
       h('button', { type: 'button', onclick: () => { selectedId = null; queueRender(); } }, 'Close'),
     ),
     h('h3', {}, req.path),
