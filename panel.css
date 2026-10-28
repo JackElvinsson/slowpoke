@@ -79,7 +79,7 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-input[type="search"], input[type="number"], select, button {
+input[type="search"], input[type="number"], input[type="text"], select, button {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
@@ -97,6 +97,7 @@ input[type="search"] { width: 220px; }
   font-variant-numeric: tabular-nums;
 }
 input[type="number"] { width: 64px; }
+#ignoreParams { width: 120px; }
 button { cursor: pointer; }
 button:hover { border-color: var(--accent); }
 
@@ -217,6 +218,7 @@ button:hover { border-color: var(--accent); }
 }
 .badge.dupe { background: color-mix(in srgb, var(--dupe) 22%, transparent); color: var(--dupe); }
 .badge.slow { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
+.badge.op { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 500; }
 
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .time.slow { color: var(--bad); font-weight: 700; }

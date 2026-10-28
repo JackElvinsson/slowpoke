@@ -39,6 +39,9 @@
         <label>Other <input id="threshold-other" type="number" min="1" step="50"> ms</label>
       </div>
     </details>
+    <label class="field" title="Query params left out when matching repeated requests. Use * to ignore all.">Ignore params
+      <input id="ignoreParams" type="text" value="_, cb, ver, v" placeholder="names, or *" autocomplete="off">
+    </label>
     <label class="chip"><input id="onlySlow" type="checkbox"><span>Only slow</span></label>
     <label class="chip"><input id="onlyDupes" type="checkbox"><span>Only repeated</span></label>
     <label class="chip"><input id="preserve" type="checkbox"><span>Keep on navigation</span></label>

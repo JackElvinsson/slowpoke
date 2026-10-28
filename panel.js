@@ -21,6 +21,7 @@ const els = {
   threshold: document.getElementById('threshold'),
   typeThresholds: document.getElementById('typeThresholds'),
   thresholds: Object.fromEntries(TYPES.map((type) => [type, document.getElementById(`threshold-${type}`)])),
+  ignoreParams: document.getElementById('ignoreParams'),
   onlySlow: document.getElementById('onlySlow'),
   onlyDupes: document.getElementById('onlyDupes'),
   preserve: document.getElementById('preserve'),
@@ -32,7 +33,7 @@ const els = {
 const ROW_HEIGHT = 30;
 const OVERSCAN = 10;
 const SETTINGS_KEY = 'slowpoke:settings';
-const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.onlySlow, els.onlyDupes, els.preserve, els.sort];
+const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.ignoreParams, els.onlySlow, els.onlyDupes, els.preserve, els.sort];
 
 let requests = [];
 let nextId = 1;
@@ -91,15 +92,63 @@ function resourceType(entry) {
   return 'other';
 }
 
+/** Returns a short FNV-1a hash of a string. */
+function hashText(text) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+/** Reads GraphQL operation names from the URL or a JSON request body, including batched operations. */
+function graphqlOperation(url, body) {
+  const fromUrl = url.searchParams.get('operationName');
+  if (fromUrl) return fromUrl;
+  if (!body) return '';
+
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return '';
+  }
+  return (Array.isArray(parsed) ? parsed : [parsed])
+    .map((op) => op?.operationName || /^\s*(?:query|mutation|subscription)\s+(\w+)/.exec(op?.query ?? '')?.[1])
+    .filter(Boolean)
+    .join(', ');
+}
+
+/** Parses the "Ignore params" setting into a set of query param names. */
+function ignoredParams() {
+  return new Set(els.ignoreParams.value.split(',').map((name) => name.trim()).filter(Boolean));
+}
+
+/** Builds the key that marks requests as repeats: method, URL without fragment and ignored params, and body hash. */
+function requestKey(req, ignored) {
+  const url = new URL(req.url, 'http://invalid');
+  url.hash = '';
+  if (ignored.has('*')) url.search = '';
+  else for (const name of ignored) url.searchParams.delete(name);
+  return `${req.method} ${url.href}${req.body ? ` #${hashText(req.body)}` : ''}`;
+}
+
+function recomputeKeys() {
+  const ignored = ignoredParams();
+  for (const req of requests) req.key = requestKey(req, ignored);
+}
+
 function toRequest(entry) {
   const url = new URL(entry.request.url, 'http://invalid');
-  const key = `${entry.request.method} ${entry.request.url.split('#')[0]}`;
-  return {
+  const body = entry.request.postData?.text || '';
+  const req = {
     id: nextId++,
-    key,
     url: entry.request.url,
     host: url.host,
     path: `${url.pathname}${url.search}` || '/',
+    body,
+    operation: graphqlOperation(url, body),
     method: entry.request.method,
     status: entry.response.status,
     type: resourceType(entry),
@@ -110,6 +159,8 @@ function toRequest(entry) {
     cached: entry.response._transferSize === 0 && entry.response.status !== 0,
     mime: entry.response.content.mimeType,
   };
+  req.key = requestKey(req, ignoredParams());
+  return req;
 }
 
 function globalThreshold() {
@@ -144,7 +195,7 @@ function groupCounts() {
 function visibleRequests(counts) {
   const term = els.search.value.trim().toLowerCase();
   let rows = requests.filter((req) => {
-    if (term && !req.url.toLowerCase().includes(term)) return false;
+    if (term && !req.url.toLowerCase().includes(term) && !req.operation.toLowerCase().includes(term)) return false;
     if (els.host.value && req.host !== els.host.value) return false;
     if (els.type.value && req.type !== els.type.value) return false;
     if (els.onlySlow.checked && !isSlow(req)) return false;
@@ -221,6 +272,7 @@ function renderRow(req, counts, minStart, span) {
       'span',
       { class: 'name' },
       h('span', { class: 'path' }, req.path, ' ', h('span', { class: 'host' }, req.host)),
+      req.operation && h('span', { class: 'badge op' }, req.operation),
       count > 1 && h('span', { class: 'badge dupe' }, `x${count}`),
       slow && h('span', { class: 'badge slow' }, 'slow'),
     ),
@@ -246,6 +298,7 @@ function buildSummary(req) {
   const runs = requests.filter((r) => r.key === req.key).sort((a, b) => a.start - b.start);
   const lines = [
     `Request: ${req.method} ${req.url}`,
+    req.operation ? `GraphQL operation: ${req.operation}` : null,
     `Status: ${req.status}`,
     `Type: ${req.mime || req.type}`,
     `Size: ${req.cached ? 'from cache' : formatBytes(req.size)}`,
@@ -262,7 +315,7 @@ function buildSummary(req) {
     runs.forEach((r, i) => lines.push(`- Call ${i + 1}: ${r.status}, ${formatMs(r.time)}, at +${formatMs(r.start - runs[0].start)}`));
   }
 
-  return lines.join('\n');
+  return lines.filter((line) => line !== null).join('\n');
 }
 
 /** Copies text to the clipboard, using a hidden textarea when the Clipboard API is unavailable. */
@@ -312,7 +365,7 @@ function buildListSummary(rows, counts) {
   for (const req of rows) {
     const count = counts.get(req.key);
     const flags = [isSlow(req) && 'slow', count > 1 && `repeated x${count}`].filter(Boolean);
-    lines.push(`- ${req.status} ${req.method} ${formatMs(req.time)} ${req.cached ? 'cache' : formatBytes(req.size)} ${req.url}${flags.length ? ` (${flags.join(', ')})` : ''}`);
+    lines.push(`- ${req.status} ${req.method} ${formatMs(req.time)} ${req.cached ? 'cache' : formatBytes(req.size)} ${req.url}${req.operation ? ` [${req.operation}]` : ''}${flags.length ? ` (${flags.join(', ')})` : ''}`);
   }
 
   return lines.join('\n');
@@ -383,6 +436,7 @@ function renderDetail(counts) {
     h('h4', {}, 'Details'),
     h('div', { class: 'kv' },
       h('span', { class: 'k' }, 'URL'), h('span', {}, req.url),
+      req.operation && [h('span', { class: 'k' }, 'Operation'), h('span', {}, req.operation)],
       h('span', { class: 'k' }, 'Status'), h('span', {}, String(req.status)),
       h('span', { class: 'k' }, 'Type'), h('span', {}, req.mime || req.type),
       h('span', { class: 'k' }, 'Size'), h('span', {}, req.cached ? 'from cache' : formatBytes(req.size)),
@@ -489,6 +543,11 @@ chrome.devtools.network.getHAR((har) => {
 els.copyList.addEventListener('click', (event) => {
   const counts = groupCounts();
   copyWithFeedback(event.currentTarget, buildListSummary(visibleRequests(counts), counts));
+});
+
+els.ignoreParams.addEventListener('input', () => {
+  recomputeKeys();
+  queueRender();
 });
 
 els.clear.addEventListener('click', () => {
