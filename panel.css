@@ -227,6 +227,9 @@ button:hover { border-color: var(--accent); }
 .badge.burst { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
 .badge.cache-hit { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
 .badge.cache-miss { background: color-mix(in srgb, var(--muted) 20%, transparent); color: var(--muted); }
+.badge.delta-slower { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
+.badge.delta-faster { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
+.badge.delta-new { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
 
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .time.slow { color: var(--bad); font-weight: 700; }

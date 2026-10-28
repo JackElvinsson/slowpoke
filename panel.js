@@ -27,6 +27,8 @@ const els = {
   preserve: document.getElementById('preserve'),
   sort: document.getElementById('sort'),
   view: document.getElementById('view'),
+  saveBaseline: document.getElementById('saveBaseline'),
+  clearBaseline: document.getElementById('clearBaseline'),
   copyList: document.getElementById('copyList'),
   clear: document.getElementById('clear'),
 };
@@ -40,6 +42,8 @@ const TEXT_MIME = /json|javascript|css|html|xml|svg|text\//;
 const STATIC_TYPES = ['script', 'stylesheet', 'image', 'font'];
 const CACHE_HEADERS = ['cf-cache-status', 'x-cache', 'x-cache-status', 'x-proxy-cache', 'x-litespeed-cache', 'x-vercel-cache'];
 const SETTINGS_KEY = 'slowpoke:settings';
+const BASELINE_KEY = 'slowpoke:baseline';
+const BASELINE_MIN_MS = 50;
 const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.ignoreParams, els.onlySlow, els.onlyDupes, els.preserve, els.sort, els.view];
 
 let requests = [];
@@ -48,6 +52,7 @@ let selectedId = null;
 let renderQueued = false;
 let rowsQueued = false;
 let hostSignature = '';
+let baseline = null;
 let current = { rows: [], grouped: false, groups: new Map(), minStart: 0, span: 1 };
 
 const listHead = h('div', { class: 'head' });
@@ -385,6 +390,73 @@ function visibleGroups(rows, groups) {
   return list.sort(byStart);
 }
 
+function loadBaseline() {
+  try {
+    baseline = JSON.parse(localStorage.getItem(BASELINE_KEY));
+  } catch {
+    baseline = null;
+  }
+}
+
+/** Stores each group's call count and average time as the baseline to compare later runs against. */
+function saveBaseline() {
+  const groups = [...buildGroups().values()];
+  baseline = {
+    savedAt: Date.now(),
+    requests: requests.length,
+    groups: Object.fromEntries(groups.map((group) => [group.key, { count: group.count, avg: group.avg }])),
+  };
+  try {
+    localStorage.setItem(BASELINE_KEY, JSON.stringify(baseline));
+  } catch {
+    // Storage unavailable, the baseline only lasts for this session.
+  }
+}
+
+function clearBaseline() {
+  baseline = null;
+  try {
+    localStorage.removeItem(BASELINE_KEY);
+  } catch {
+    // Storage unavailable, nothing was stored.
+  }
+}
+
+/** Compares a time and call count against the baseline entry for a key. */
+function compareToBaseline(key, time, count) {
+  if (!baseline) return null;
+  const before = baseline.groups[key];
+  if (!before) return { kind: 'new' };
+  const diff = time - before.avg;
+  const significant = Math.abs(diff) >= Math.max(BASELINE_MIN_MS, before.avg * 0.2);
+  return { kind: significant ? (diff > 0 ? 'slower' : 'faster') : 'same', diff, before, nowRepeated: before.count < 2 && count > 1 };
+}
+
+function baselineText(delta) {
+  if (delta.kind === 'new') return 'not in the baseline';
+  return `average ${formatMs(delta.before.avg)} over ${delta.before.count} calls, now ${formatDiff(delta.diff)}${delta.nowRepeated ? ', now repeated' : ''}`;
+}
+
+function formatDiff(ms) {
+  return `${ms >= 0 ? '+' : '-'}${formatMs(Math.abs(ms))}`;
+}
+
+function baselineBadges(delta) {
+  if (!delta) return null;
+  if (delta.kind === 'new') return h('span', { class: 'badge delta-new', title: 'Not in the baseline' }, 'new');
+  return [
+    delta.kind !== 'same' && h('span', { class: `badge delta-${delta.kind}`, title: `Baseline average ${formatMs(delta.before.avg)}` }, formatDiff(delta.diff)),
+    delta.nowRepeated && h('span', { class: 'badge dupe', title: 'Called once in the baseline' }, 'now repeated'),
+  ];
+}
+
+/** Lists a delta's changes against the baseline as short text flags. */
+function baselineFlags(delta) {
+  if (!delta) return [];
+  if (delta.kind === 'new') return ['new since baseline'];
+  return [delta.kind !== 'same' && `${formatDiff(delta.diff)} vs baseline`, delta.nowRepeated && 'now repeated'].filter(Boolean);
+}
+
 /** Rebuilds the host dropdown with request counts, keeping the current selection. */
 function renderHosts() {
   const hosts = new Map();
@@ -414,14 +486,28 @@ function renderSummary(groups) {
   const card = (label, value, cls = '') =>
     h('div', { class: `card ${cls}` }, h('div', { class: 'label' }, label), h('div', { class: 'value' }, value));
 
-  els.summary.replaceChildren(
+  setChildren(
+    els.summary,
     card('Requests', String(requests.length)),
     card('Slow', String(slow), slow ? 'bad' : ''),
     card('Repeated URLs', `${repeatedGroups.length} (+${extraCalls})`, extraCalls ? 'dupe' : ''),
     card('Bursts', String(bursts), bursts ? 'dupe' : ''),
     card('Slowest', formatMs(slowest)),
     card('Sum of time', formatMs(total)),
+    baseline && renderBaselineCard(groups, card),
   );
+  els.clearBaseline.hidden = !baseline;
+}
+
+/** Counts the groups that got slower, faster or are new since the baseline and builds their summary card. */
+function renderBaselineCard(groups, card) {
+  const deltas = [...groups.values()].map((group) => compareToBaseline(group.key, group.avg, group.count));
+  const count = (kind) => deltas.filter((delta) => delta.kind === kind).length;
+  const slower = count('slower');
+  const saved = new Date(baseline.savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const el = card(`Vs baseline (${saved})`, `${slower} slower, ${count('faster')} faster, ${count('new')} new`, slower ? 'bad' : '');
+  el.title = `Baseline of ${baseline.requests} requests saved ${new Date(baseline.savedAt).toLocaleString()}`;
+  return el;
 }
 
 function renderRow(req, groups, minStart, span) {
@@ -451,6 +537,7 @@ function renderRow(req, groups, minStart, span) {
       count > 1 && h('span', { class: 'badge dupe' }, `x${count}`),
       burst && h('span', { class: 'badge burst', title: burstLabel(burst) }, `${burst.count} in ${formatMs(burst.span)}`),
       slow && h('span', { class: 'badge slow' }, 'slow'),
+      baselineBadges(compareToBaseline(req.key, req.time, count)),
     ),
     h('span', { class: 'num' }, req.cached ? 'cache' : formatBytes(req.size)),
     h('span', { class: `num time ${timeClass}` }, formatMs(req.time)),
@@ -492,6 +579,7 @@ function renderGroupRow(group) {
       last.operation && h('span', { class: 'badge op' }, last.operation),
       group.burst && h('span', { class: 'badge burst', title: burstLabel(group.burst) }, `${group.burst.count} in ${formatMs(group.burst.span)}`),
       slow && h('span', { class: 'badge slow' }, 'slow'),
+      baselineBadges(compareToBaseline(group.key, group.avg, group.count)),
     ),
     h('span', { class: 'num' }, formatMs(group.avg)),
     h('span', { class: 'num' }, formatMs(group.p95)),
@@ -514,6 +602,7 @@ function buildSummary(req, groups) {
     req.cache ? `CDN/proxy cache: ${cacheLabel(req.cache)}` : null,
     `Started: ${new Date(req.start).toISOString()}`,
     `Total time: ${formatMs(req.time)}${isSlow(req) ? ` (slow, threshold ${threshold} ms)` : ''}`,
+    baseline ? `Baseline: ${baselineText(compareToBaseline(req.key, req.time, runs.length))}` : null,
     ...(hints.length ? ['', 'Hints:', ...hints.map((hint) => `- ${hint}`)] : []),
     '',
     'Timing breakdown:',
@@ -557,11 +646,16 @@ async function copyText(text) {
   }
 }
 
+/** Briefly replaces a button's label with a status message. */
+function flashLabel(button, message) {
+  button.dataset.label ||= button.textContent;
+  button.textContent = message;
+  setTimeout(() => { button.textContent = button.dataset.label; }, 1500);
+}
+
 /** Copies text and briefly shows the result on the button. */
 async function copyWithFeedback(button, text) {
-  button.dataset.label ||= button.textContent;
-  button.textContent = (await copyText(text)) ? 'Copied' : 'Copy failed';
-  setTimeout(() => { button.textContent = button.dataset.label; }, 1500);
+  flashLabel(button, (await copyText(text)) ? 'Copied' : 'Copy failed');
 }
 
 /** Builds a plain-text list of the given requests, or of their groups in grouped view, with the active filters and sort order. */
@@ -583,13 +677,18 @@ function buildListSummary(rows, groups) {
     `Filters: ${filters.length ? filters.join(', ') : 'none'}`,
     `Slow threshold: ${globalThreshold()} ms${overrides.length ? ` (${overrides.join(', ')})` : ''}`,
     `Sorted by: ${sortLabels[els.sort.value]}`,
+    baseline ? `Compared to baseline of ${baseline.requests} requests saved ${new Date(baseline.savedAt).toISOString()}` : null,
     '',
-  ];
+  ].filter((line) => line !== null);
 
   if (grouped) {
     for (const group of visibleGroups(rows, groups)) {
       const last = group.runs.at(-1);
-      const flags = [group.max >= thresholdFor(last) && 'slow', group.burst && `burst of ${burstLabel(group.burst)}`].filter(Boolean);
+      const flags = [
+        group.max >= thresholdFor(last) && 'slow',
+        group.burst && `burst of ${burstLabel(group.burst)}`,
+        ...baselineFlags(compareToBaseline(group.key, group.avg, group.count)),
+      ].filter(Boolean);
       lines.push(`- x${group.count} ${last.method} avg ${formatMs(group.avg)}, p95 ${formatMs(group.p95)}, max ${formatMs(group.max)}, total ${formatMs(group.total)} ${last.url}${last.operation ? ` [${last.operation}]` : ''}${flags.length ? ` (${flags.join(', ')})` : ''}`);
     }
     return lines.join('\n');
@@ -597,7 +696,13 @@ function buildListSummary(rows, groups) {
 
   for (const req of rows) {
     const { count, burst } = groups.get(req.key);
-    const flags = [isSlow(req) && 'slow', req.cache && req.cache.status !== 'other' && `cache ${req.cache.status}`, count > 1 && `repeated x${count}`, burst && `burst of ${burstLabel(burst)}`].filter(Boolean);
+    const flags = [
+      isSlow(req) && 'slow',
+      req.cache && req.cache.status !== 'other' && `cache ${req.cache.status}`,
+      count > 1 && `repeated x${count}`,
+      burst && `burst of ${burstLabel(burst)}`,
+      ...baselineFlags(compareToBaseline(req.key, req.time, count)),
+    ].filter(Boolean);
     const caller = req.initiator?.frames[0];
     lines.push(`- ${req.status} ${req.method} ${formatMs(req.time)} ${req.cached ? 'cache' : formatBytes(req.size)} ${req.url}${req.operation ? ` [${req.operation}]` : ''}${caller ? ` from ${frameLabel(caller)}` : ''}${flags.length ? ` (${flags.join(', ')})` : ''}`);
   }
@@ -706,6 +811,7 @@ function renderDetail(groups) {
       h('span', { class: 'k' }, 'Type'), h('span', {}, req.mime || req.type),
       h('span', { class: 'k' }, 'Size'), h('span', {}, req.cached ? 'from cache' : formatBytes(req.size)),
       req.cache && [h('span', { class: 'k' }, 'CDN cache'), h('span', {}, cacheLabel(req.cache))],
+      baseline && [h('span', { class: 'k' }, 'Baseline'), h('span', {}, baselineText(compareToBaseline(req.key, req.time, runs.length)))],
     ),
   );
 }
@@ -822,6 +928,17 @@ chrome.devtools.network.getHAR((har) => {
   queueRender();
 });
 
+els.saveBaseline.addEventListener('click', (event) => {
+  saveBaseline();
+  flashLabel(event.currentTarget, 'Saved');
+  queueRender();
+});
+
+els.clearBaseline.addEventListener('click', () => {
+  clearBaseline();
+  queueRender();
+});
+
 els.copyList.addEventListener('click', (event) => {
   const groups = buildGroups();
   copyWithFeedback(event.currentTarget, buildListSummary(visibleRequests(groups), groups));
@@ -854,4 +971,5 @@ for (const el of persisted) {
 }
 
 loadSettings();
+loadBaseline();
 queueRender();
