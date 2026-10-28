@@ -32,6 +32,7 @@ const els = {
 
 const ROW_HEIGHT = 30;
 const OVERSCAN = 10;
+const BURST_MS = 1000;
 const SETTINGS_KEY = 'slowpoke:settings';
 const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.ignoreParams, els.onlySlow, els.onlyDupes, els.preserve, els.sort];
 
@@ -41,7 +42,7 @@ let selectedId = null;
 let renderQueued = false;
 let rowsQueued = false;
 let hostSignature = '';
-let current = { rows: [], counts: new Map(), minStart: 0, span: 1 };
+let current = { rows: [], groups: new Map(), minStart: 0, span: 1 };
 
 const listHead = h('div', { class: 'head' },
   h('span', {}, 'Status'), h('span', {}, 'Method'), h('span', {}, 'Request'),
@@ -186,27 +187,52 @@ function renderThresholds() {
   summary.classList.toggle('active', overrides > 0);
 }
 
-function groupCounts() {
-  const counts = new Map();
-  for (const req of requests) counts.set(req.key, (counts.get(req.key) || 0) + 1);
-  return counts;
+/** Finds the largest set of calls that started within BURST_MS of each other in a start-sorted run list. */
+function findBurst(runs) {
+  let best = null;
+  for (let lo = 0, hi = 0; hi < runs.length; hi++) {
+    while (runs[hi].start - runs[lo].start >= BURST_MS) lo++;
+    const count = hi - lo + 1;
+    if (count > 1 && (!best || count > best.count)) best = { count, span: runs[hi].start - runs[lo].start };
+  }
+  return best;
 }
 
-function visibleRequests(counts) {
+/** Groups requests by key with their start-sorted runs, combined time and burst. */
+function buildGroups() {
+  const groups = new Map();
+  for (const req of requests) {
+    if (!groups.has(req.key)) groups.set(req.key, { key: req.key, runs: [] });
+    groups.get(req.key).runs.push(req);
+  }
+  for (const group of groups.values()) {
+    group.runs.sort((a, b) => a.start - b.start);
+    group.count = group.runs.length;
+    group.total = group.runs.reduce((sum, r) => sum + r.time, 0);
+    group.burst = findBurst(group.runs);
+  }
+  return groups;
+}
+
+function burstLabel(burst) {
+  return `${burst.count} calls within ${formatMs(burst.span)}`;
+}
+
+function visibleRequests(groups) {
   const term = els.search.value.trim().toLowerCase();
   let rows = requests.filter((req) => {
     if (term && !req.url.toLowerCase().includes(term) && !req.operation.toLowerCase().includes(term)) return false;
     if (els.host.value && req.host !== els.host.value) return false;
     if (els.type.value && req.type !== els.type.value) return false;
     if (els.onlySlow.checked && !isSlow(req)) return false;
-    if (els.onlyDupes.checked && counts.get(req.key) < 2) return false;
+    if (els.onlyDupes.checked && groups.get(req.key).count < 2) return false;
     return true;
   });
 
   if (els.sort.value === 'time') {
     rows = rows.sort((a, b) => b.time - a.time);
   } else if (els.sort.value === 'count') {
-    rows = rows.sort((a, b) => counts.get(b.key) - counts.get(a.key) || a.key.localeCompare(b.key) || a.start - b.start);
+    rows = rows.sort((a, b) => groups.get(b.key).count - groups.get(a.key).count || a.key.localeCompare(b.key) || a.start - b.start);
   } else {
     rows = rows.sort((a, b) => a.start - b.start);
   }
@@ -231,10 +257,11 @@ function renderHosts() {
   els.host.value = selected;
 }
 
-function renderSummary(counts) {
+function renderSummary(groups) {
   const slow = requests.filter(isSlow).length;
-  const repeatedGroups = [...counts.values()].filter((n) => n > 1);
-  const extraCalls = repeatedGroups.reduce((sum, n) => sum + n - 1, 0);
+  const repeatedGroups = [...groups.values()].filter((group) => group.count > 1);
+  const extraCalls = repeatedGroups.reduce((sum, group) => sum + group.count - 1, 0);
+  const bursts = repeatedGroups.filter((group) => group.burst).length;
   const total = requests.reduce((sum, req) => sum + req.time, 0);
   const slowest = requests.reduce((max, req) => (req.time > max ? req.time : max), 0);
 
@@ -245,13 +272,14 @@ function renderSummary(counts) {
     card('Requests', String(requests.length)),
     card('Slow', String(slow), slow ? 'bad' : ''),
     card('Repeated URLs', `${repeatedGroups.length} (+${extraCalls})`, extraCalls ? 'dupe' : ''),
+    card('Bursts', String(bursts), bursts ? 'dupe' : ''),
     card('Slowest', formatMs(slowest)),
     card('Sum of time', formatMs(total)),
   );
 }
 
-function renderRow(req, counts, minStart, span) {
-  const count = counts.get(req.key);
+function renderRow(req, groups, minStart, span) {
+  const { count, burst } = groups.get(req.key);
   const slow = isSlow(req);
   const barClass = slow ? 'slow' : count > 1 ? 'dupe' : '';
   const timeClass = slow ? 'slow' : req.time >= thresholdFor(req) / 2 ? 'mid' : '';
@@ -274,6 +302,7 @@ function renderRow(req, counts, minStart, span) {
       h('span', { class: 'path' }, req.path, ' ', h('span', { class: 'host' }, req.host)),
       req.operation && h('span', { class: 'badge op' }, req.operation),
       count > 1 && h('span', { class: 'badge dupe' }, `x${count}`),
+      burst && h('span', { class: 'badge burst', title: burstLabel(burst) }, `${burst.count} in ${formatMs(burst.span)}`),
       slow && h('span', { class: 'badge slow' }, 'slow'),
     ),
     h('span', { class: 'num' }, req.cached ? 'cache' : formatBytes(req.size)),
@@ -293,9 +322,9 @@ function renderRow(req, counts, minStart, span) {
 }
 
 /** Builds a plain-text summary of a request, including its timing phases and repeated calls. */
-function buildSummary(req) {
+function buildSummary(req, groups) {
   const threshold = thresholdFor(req);
-  const runs = requests.filter((r) => r.key === req.key).sort((a, b) => a.start - b.start);
+  const { runs, total, burst } = groups.get(req.key);
   const lines = [
     `Request: ${req.method} ${req.url}`,
     req.operation ? `GraphQL operation: ${req.operation}` : null,
@@ -310,8 +339,7 @@ function buildSummary(req) {
   ];
 
   if (runs.length > 1) {
-    const combined = runs.reduce((sum, r) => sum + r.time, 0);
-    lines.push('', `Called ${runs.length} times, combined time ${formatMs(combined)}:`);
+    lines.push('', `Called ${runs.length} times, combined time ${formatMs(total)}${burst ? `, burst of ${burstLabel(burst)}` : ''}:`);
     runs.forEach((r, i) => lines.push(`- Call ${i + 1}: ${r.status}, ${formatMs(r.time)}, at +${formatMs(r.start - runs[0].start)}`));
   }
 
@@ -342,7 +370,7 @@ async function copyWithFeedback(button, text) {
 }
 
 /** Builds a plain-text list of the given requests, with the active filters and sort order. */
-function buildListSummary(rows, counts) {
+function buildListSummary(rows, groups) {
   const sortLabels = { start: 'start time', time: 'slowest first', count: 'most repeated' };
   const filters = [
     els.host.value && `host=${els.host.value}`,
@@ -363,15 +391,15 @@ function buildListSummary(rows, counts) {
   ];
 
   for (const req of rows) {
-    const count = counts.get(req.key);
-    const flags = [isSlow(req) && 'slow', count > 1 && `repeated x${count}`].filter(Boolean);
+    const { count, burst } = groups.get(req.key);
+    const flags = [isSlow(req) && 'slow', count > 1 && `repeated x${count}`, burst && `burst of ${burstLabel(burst)}`].filter(Boolean);
     lines.push(`- ${req.status} ${req.method} ${formatMs(req.time)} ${req.cached ? 'cache' : formatBytes(req.size)} ${req.url}${req.operation ? ` [${req.operation}]` : ''}${flags.length ? ` (${flags.join(', ')})` : ''}`);
   }
 
   return lines.join('\n');
 }
 
-function renderDetail(counts) {
+function renderDetail(groups) {
   const req = requests.find((r) => r.id === selectedId);
   if (!req) {
     els.detail.hidden = true;
@@ -381,7 +409,7 @@ function renderDetail(counts) {
 
   const phases = PHASES.map(([key, label, color]) => ({ label, color, value: Math.max(req.timings[key] ?? -1, 0) }));
   const phaseTotal = phases.reduce((sum, p) => sum + p.value, 0) || 1;
-  const runs = requests.filter((r) => r.key === req.key).sort((a, b) => a.start - b.start);
+  const { runs, total, burst } = groups.get(req.key);
   const firstStart = runs[0].start;
 
   setChildren(
@@ -391,7 +419,7 @@ function renderDetail(counts) {
       { class: 'actions' },
       h('button', {
         type: 'button',
-        onclick: (event) => copyWithFeedback(event.currentTarget, buildSummary(req)),
+        onclick: (event) => copyWithFeedback(event.currentTarget, buildSummary(req, groups)),
       }, 'Copy for LLM'),
       h('button', { type: 'button', onclick: () => { selectedId = null; queueRender(); } }, 'Close'),
     ),
@@ -421,6 +449,7 @@ function renderDetail(counts) {
 
     runs.length > 1 && [
       h('h4', {}, `Called ${runs.length} times`),
+      burst && h('div', { class: 'note burst' }, `Burst: ${burstLabel(burst)}`),
       runs.map((r, i) =>
         h('div', { class: 'run' },
           h('span', {}, i === 0 ? 'First call' : `+${formatMs(r.start - firstStart)}`),
@@ -429,7 +458,7 @@ function renderDetail(counts) {
       ),
       h('div', { class: 'run' },
         h('strong', {}, 'Combined time'),
-        h('strong', {}, formatMs(runs.reduce((sum, r) => sum + r.time, 0))),
+        h('strong', {}, formatMs(total)),
       ),
     ],
 
@@ -446,27 +475,27 @@ function renderDetail(counts) {
 
 function render() {
   renderQueued = false;
-  const counts = groupCounts();
-  renderSummary(counts);
+  const groups = buildGroups();
+  renderSummary(groups);
   renderHosts();
   renderThresholds();
 
-  const rows = visibleRequests(counts);
+  const rows = visibleRequests(groups);
   const shownTime = rows.reduce((sum, req) => sum + req.time, 0);
   els.count.textContent = `Showing ${rows.length} of ${requests.length} requests, ${formatMs(shownTime)} total`;
   const minStart = requests.reduce((min, r) => Math.min(min, r.start), Infinity);
   const maxEnd = requests.reduce((max, r) => Math.max(max, r.start + r.time), 0);
   const span = Math.max(maxEnd - minStart, 1);
 
-  current = { rows, counts, minStart, span };
+  current = { rows, groups, minStart, span };
   renderRows();
-  renderDetail(counts);
+  renderDetail(groups);
 }
 
 /** Renders the rows inside the scrolled viewport, plus a small overscan. */
 function renderRows() {
   rowsQueued = false;
-  const { rows, counts, minStart, span } = current;
+  const { rows, groups, minStart, span } = current;
 
   if (!rows.length) {
     listRows.style.height = '';
@@ -480,7 +509,7 @@ function renderRows() {
   const last = Math.min(Math.ceil((offset + els.list.clientHeight) / ROW_HEIGHT) + OVERSCAN, rows.length);
 
   setChildren(listRows, rows.slice(first, last).map((req, i) => {
-    const row = renderRow(req, counts, minStart, span);
+    const row = renderRow(req, groups, minStart, span);
     row.style.top = `${(first + i) * ROW_HEIGHT}px`;
     return row;
   }));
@@ -541,8 +570,8 @@ chrome.devtools.network.getHAR((har) => {
 });
 
 els.copyList.addEventListener('click', (event) => {
-  const counts = groupCounts();
-  copyWithFeedback(event.currentTarget, buildListSummary(visibleRequests(counts), counts));
+  const groups = buildGroups();
+  copyWithFeedback(event.currentTarget, buildListSummary(visibleRequests(groups), groups));
 });
 
 els.ignoreParams.addEventListener('input', () => {

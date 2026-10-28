@@ -219,6 +219,7 @@ button:hover { border-color: var(--accent); }
 .badge.dupe { background: color-mix(in srgb, var(--dupe) 22%, transparent); color: var(--dupe); }
 .badge.slow { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
 .badge.op { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 500; }
+.badge.burst { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
 
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .time.slow { color: var(--bad); font-weight: 700; }
@@ -258,6 +259,8 @@ button:hover { border-color: var(--accent); }
 .detail h3 { margin: 0 0 4px; font-size: 13px; word-break: break-all; }
 .detail h4 { margin: 16px 0 6px; font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
 .detail .actions { display: flex; gap: 6px; justify-content: flex-end; margin-bottom: 8px; }
+.detail .note { margin-bottom: 6px; font-weight: 600; }
+.detail .note.burst { color: var(--warn); }
 
 .phases {
   display: flex;
