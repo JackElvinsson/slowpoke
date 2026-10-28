@@ -36,6 +36,8 @@ const OVERSCAN = 10;
 const BURST_MS = 1000;
 const MAX_FRAMES = 30;
 const SHOWN_FRAMES = 10;
+const TEXT_MIME = /json|javascript|css|html|xml|svg|text\//;
+const STATIC_TYPES = ['script', 'stylesheet', 'image', 'font'];
 const CACHE_HEADERS = ['cf-cache-status', 'x-cache', 'x-cache-status', 'x-proxy-cache', 'x-litespeed-cache', 'x-vercel-cache'];
 const SETTINGS_KEY = 'slowpoke:settings';
 const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.ignoreParams, els.onlySlow, els.onlyDupes, els.preserve, els.sort, els.view];
@@ -226,6 +228,45 @@ function cacheLabel(cache) {
   return cache.status === 'other' ? cache.source : `${cache.status.toUpperCase()} (${cache.source})`;
 }
 
+/** Checks a request's timings and headers against common causes of slowness and lists the ones that match. */
+function buildHints(req) {
+  const hints = [];
+  const phase = (key) => Math.max(req.timings[key] ?? 0, 0);
+  const header = (name) => headerValues(req.responseHeaders, name)[0] ?? '';
+
+  const wait = phase('wait');
+  if (wait >= 200 && wait >= req.time * 0.6) {
+    hints.push(`Server wait is ${formatMs(wait)} (${Math.round((wait / req.time) * 100)}% of the total), so the backend is the bottleneck${req.cache?.status === 'miss' ? ' and the response was not served from cache' : ''}.`);
+  }
+
+  const blocked = phase('blocked');
+  if (blocked >= 100) {
+    hints.push(/^http\/1/i.test(req.httpVersion)
+      ? `Queued ${formatMs(blocked)} before sending. HTTP/1.1 allows 6 connections per host, so requests wait for a free one.`
+      : `Queued ${formatMs(blocked)} before sending, usually behind higher-priority requests or a busy main thread.`);
+  }
+
+  const setup = phase('dns') + phase('connect');
+  if (setup >= 100) hints.push(`Connection setup took ${formatMs(setup)}. A preconnect hint for ${req.host} starts it earlier.`);
+
+  if (req.status >= 300 && req.status < 400 && header('location')) hints.push(`Redirects to ${header('location')}, which costs an extra round trip.`);
+
+  if (!req.cached && req.size >= 10 * 1024 && TEXT_MIME.test(req.mime) && !header('content-encoding')) {
+    hints.push(`Text response of ${formatBytes(req.size)} is not compressed. Enable gzip or brotli.`);
+  }
+
+  if (req.size >= 1024 * 1024) hints.push(`Large response, ${formatBytes(req.size)} transferred.`);
+
+  if (STATIC_TYPES.includes(req.type) && req.status === 200 && !req.cached && !header('expires')) {
+    const cacheControl = header('cache-control');
+    if (!cacheControl || /no-store|no-cache|max-age=0\b/.test(cacheControl)) {
+      hints.push('Static asset without long-lived cache headers, so the browser fetches it again on every visit.');
+    }
+  }
+
+  return hints;
+}
+
 function toRequest(entry) {
   const url = new URL(entry.request.url, 'http://invalid');
   const body = entry.request.postData?.text || '';
@@ -239,6 +280,7 @@ function toRequest(entry) {
     operation: graphqlOperation(url, body),
     method: entry.request.method,
     status: entry.response.status,
+    httpVersion: entry.response.httpVersion,
     type: resourceType(entry),
     start: new Date(entry.startedDateTime).getTime(),
     time: Math.max(entry.time, 0),
@@ -461,6 +503,7 @@ function renderGroupRow(group) {
 /** Builds a plain-text summary of a request, including its timing phases and repeated calls. */
 function buildSummary(req, groups) {
   const threshold = thresholdFor(req);
+  const hints = buildHints(req);
   const { runs, total, burst } = groups.get(req.key);
   const lines = [
     `Request: ${req.method} ${req.url}`,
@@ -471,6 +514,7 @@ function buildSummary(req, groups) {
     req.cache ? `CDN/proxy cache: ${cacheLabel(req.cache)}` : null,
     `Started: ${new Date(req.start).toISOString()}`,
     `Total time: ${formatMs(req.time)}${isSlow(req) ? ` (slow, threshold ${threshold} ms)` : ''}`,
+    ...(hints.length ? ['', 'Hints:', ...hints.map((hint) => `- ${hint}`)] : []),
     '',
     'Timing breakdown:',
     ...PHASES.map(([key, label]) => `- ${label}: ${req.timings[key] > 0 ? formatMs(req.timings[key]) : '-'}`),
@@ -573,6 +617,7 @@ function renderDetail(groups) {
   const phaseTotal = phases.reduce((sum, p) => sum + p.value, 0) || 1;
   const { runs, total, burst } = groups.get(req.key);
   const callers = runs.length > 1 ? findCallers(runs) : [];
+  const hints = buildHints(req);
   const firstStart = runs[0].start;
 
   setChildren(
@@ -588,6 +633,11 @@ function renderDetail(groups) {
     ),
     h('h3', {}, req.path),
     h('div', { class: 'host' }, `${req.method} ${req.host}`),
+
+    hints.length > 0 && [
+      h('h4', {}, 'Hints'),
+      h('ul', { class: 'hints' }, hints.map((hint) => h('li', {}, hint))),
+    ],
 
     h('h4', {}, 'Where the time went'),
     h(

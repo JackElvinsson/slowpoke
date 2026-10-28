@@ -271,6 +271,8 @@ button:hover { border-color: var(--accent); }
 .detail .muted { color: var(--muted); }
 .detail .frame { padding: 1px 0; }
 .detail .callers { margin-bottom: 6px; }
+.detail .hints { margin: 0; padding-left: 16px; }
+.detail .hints li { margin-bottom: 4px; }
 
 button.link {
   padding: 0;
