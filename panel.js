@@ -36,6 +36,7 @@ const OVERSCAN = 10;
 const BURST_MS = 1000;
 const MAX_FRAMES = 30;
 const SHOWN_FRAMES = 10;
+const CACHE_HEADERS = ['cf-cache-status', 'x-cache', 'x-cache-status', 'x-proxy-cache', 'x-litespeed-cache', 'x-vercel-cache'];
 const SETTINGS_KEY = 'slowpoke:settings';
 const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.ignoreParams, els.onlySlow, els.onlyDupes, els.preserve, els.sort, els.view];
 
@@ -190,9 +191,45 @@ function frameLink(frame) {
   return h('button', { type: 'button', class: 'link', title: `${frame.url}:${frame.line + 1}`, onclick: () => openFrame(frame) }, frameLabel(frame));
 }
 
+function headerValues(headers, name) {
+  return headers.filter((header) => header.name === name).map((header) => header.value);
+}
+
+/** Parses Server-Timing header values into metrics with name, duration and description. */
+function parseServerTiming(values) {
+  const metrics = [];
+  for (const part of values.join(',').match(/(?:[^,"]|"[^"]*")+/g) ?? []) {
+    const name = part.split(';')[0].trim();
+    if (!name) continue;
+    const params = Object.fromEntries(
+      [...part.matchAll(/;\s*(\w+)\s*=\s*(?:"([^"]*)"|([^;\s]*))/g)].map(([, key, quoted, plain]) => [key.toLowerCase(), quoted ?? plain]),
+    );
+    metrics.push({ name, dur: params.dur ? Number(params.dur) : null, desc: params.desc ?? '' });
+  }
+  return metrics;
+}
+
+/** Reads the cache result from known CDN and proxy headers, or from a positive Age header. */
+function parseCacheStatus(headers) {
+  for (const name of CACHE_HEADERS) {
+    const value = headerValues(headers, name)[0];
+    if (!value) continue;
+    const last = value.split(',').pop().trim().toLowerCase();
+    const status = /hit|stale|revalidated|updating/.test(last) ? 'hit' : /miss|expired|bypass|dynamic|pass/.test(last) ? 'miss' : 'other';
+    return { status, source: `${name}: ${value}` };
+  }
+  const age = Number(headerValues(headers, 'age')[0]);
+  return age > 0 ? { status: 'hit', source: `age: ${age}` } : null;
+}
+
+function cacheLabel(cache) {
+  return cache.status === 'other' ? cache.source : `${cache.status.toUpperCase()} (${cache.source})`;
+}
+
 function toRequest(entry) {
   const url = new URL(entry.request.url, 'http://invalid');
   const body = entry.request.postData?.text || '';
+  const responseHeaders = entry.response.headers.map(({ name, value }) => ({ name: name.toLowerCase(), value }));
   const req = {
     id: nextId++,
     url: entry.request.url,
@@ -210,6 +247,9 @@ function toRequest(entry) {
     cached: entry.response._transferSize === 0 && entry.response.status !== 0,
     mime: entry.response.content.mimeType,
     initiator: parseInitiator(entry._initiator),
+    responseHeaders,
+    serverTiming: parseServerTiming(headerValues(responseHeaders, 'server-timing')),
+    cache: parseCacheStatus(responseHeaders),
   };
   req.key = requestKey(req, ignoredParams());
   return req;
@@ -365,6 +405,7 @@ function renderRow(req, groups, minStart, span) {
       { class: 'name' },
       h('span', { class: 'path' }, req.path, ' ', h('span', { class: 'host' }, req.host)),
       req.operation && h('span', { class: 'badge op' }, req.operation),
+      req.cache && req.cache.status !== 'other' && h('span', { class: `badge cache-${req.cache.status}`, title: req.cache.source }, req.cache.status.toUpperCase()),
       count > 1 && h('span', { class: 'badge dupe' }, `x${count}`),
       burst && h('span', { class: 'badge burst', title: burstLabel(burst) }, `${burst.count} in ${formatMs(burst.span)}`),
       slow && h('span', { class: 'badge slow' }, 'slow'),
@@ -427,12 +468,18 @@ function buildSummary(req, groups) {
     `Status: ${req.status}`,
     `Type: ${req.mime || req.type}`,
     `Size: ${req.cached ? 'from cache' : formatBytes(req.size)}`,
+    req.cache ? `CDN/proxy cache: ${cacheLabel(req.cache)}` : null,
     `Started: ${new Date(req.start).toISOString()}`,
     `Total time: ${formatMs(req.time)}${isSlow(req) ? ` (slow, threshold ${threshold} ms)` : ''}`,
     '',
     'Timing breakdown:',
     ...PHASES.map(([key, label]) => `- ${label}: ${req.timings[key] > 0 ? formatMs(req.timings[key]) : '-'}`),
   ];
+
+  if (req.serverTiming.length) {
+    lines.push('', 'Server-Timing:');
+    req.serverTiming.forEach((m) => lines.push(`- ${m.name}${m.desc ? ` (${m.desc})` : ''}: ${m.dur !== null ? formatMs(m.dur) : '-'}`));
+  }
 
   if (req.initiator) {
     lines.push('', `Initiator (${req.initiator.type}):`);
@@ -506,7 +553,7 @@ function buildListSummary(rows, groups) {
 
   for (const req of rows) {
     const { count, burst } = groups.get(req.key);
-    const flags = [isSlow(req) && 'slow', count > 1 && `repeated x${count}`, burst && `burst of ${burstLabel(burst)}`].filter(Boolean);
+    const flags = [isSlow(req) && 'slow', req.cache && req.cache.status !== 'other' && `cache ${req.cache.status}`, count > 1 && `repeated x${count}`, burst && `burst of ${burstLabel(burst)}`].filter(Boolean);
     const caller = req.initiator?.frames[0];
     lines.push(`- ${req.status} ${req.method} ${formatMs(req.time)} ${req.cached ? 'cache' : formatBytes(req.size)} ${req.url}${req.operation ? ` [${req.operation}]` : ''}${caller ? ` from ${frameLabel(caller)}` : ''}${flags.length ? ` (${flags.join(', ')})` : ''}`);
   }
@@ -563,6 +610,17 @@ function renderDetail(groups) {
       h('strong', { class: 'v' }, formatMs(req.time)),
     ),
 
+    req.serverTiming.length > 0 && [
+      h('h4', {}, 'Server timing'),
+      req.serverTiming.map((m) =>
+        h('div', { class: 'phase-row' },
+          h('span', { class: 'dot', style: { background: 'var(--ph-wait)' } }),
+          h('span', { class: 'k' }, m.desc ? `${m.name} (${m.desc})` : m.name),
+          h('span', { class: 'v' }, m.dur !== null ? formatMs(m.dur) : '-'),
+        ),
+      ),
+    ],
+
     h('h4', {}, 'Initiated by'),
     req.initiator?.frames.length
       ? [
@@ -597,6 +655,7 @@ function renderDetail(groups) {
       h('span', { class: 'k' }, 'Status'), h('span', {}, String(req.status)),
       h('span', { class: 'k' }, 'Type'), h('span', {}, req.mime || req.type),
       h('span', { class: 'k' }, 'Size'), h('span', {}, req.cached ? 'from cache' : formatBytes(req.size)),
+      req.cache && [h('span', { class: 'k' }, 'CDN cache'), h('span', {}, cacheLabel(req.cache))],
     ),
   );
 }
