@@ -3,5 +3,11 @@
   "name": "Slowpoke",
   "version": "1.0.0",
   "description": "See which requests are slow and which run multiple times, right inside DevTools.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "devtools_page": "devtools.html"
 }

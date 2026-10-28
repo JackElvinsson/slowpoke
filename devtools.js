@@ -1,1 +1,1 @@
-chrome.devtools.panels.create('Slowpoke', '', 'panel.html');
+chrome.devtools.panels.create('Slowpoke', 'icons/icon-32.png', 'panel.html');
