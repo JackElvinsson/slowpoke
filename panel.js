@@ -25,6 +25,9 @@ const els = {
   clear: document.getElementById('clear'),
 };
 
+const SETTINGS_KEY = 'slowpoke:settings';
+const persisted = [els.type, els.threshold, els.onlySlow, els.onlyDupes, els.preserve, els.sort];
+
 let requests = [];
 let nextId = 1;
 let selectedId = null;
@@ -389,6 +392,31 @@ function queueRender() {
   requestAnimationFrame(render);
 }
 
+/** Restores the persisted toolbar settings from localStorage. */
+function loadSettings() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
+  } catch {
+    return;
+  }
+  for (const el of persisted) {
+    if (!(el.id in saved)) continue;
+    if (el.type === 'checkbox') el.checked = Boolean(saved[el.id]);
+    else el.value = saved[el.id];
+  }
+}
+
+/** Writes the persisted toolbar settings to localStorage. */
+function saveSettings() {
+  const values = Object.fromEntries(persisted.map((el) => [el.id, el.type === 'checkbox' ? el.checked : el.value]));
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(values));
+  } catch {
+    // Storage unavailable, settings only last for this session.
+  }
+}
+
 chrome.devtools.network.onRequestFinished.addListener((entry) => {
   requests.push(toRequest(entry));
   queueRender();
@@ -421,4 +449,9 @@ for (const el of [els.search, els.host, els.type, els.threshold, els.onlySlow, e
   el.addEventListener('input', queueRender);
 }
 
+for (const el of persisted) {
+  el.addEventListener('input', saveSettings);
+}
+
+loadSettings();
 queueRender();
