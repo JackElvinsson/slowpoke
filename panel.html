@@ -27,6 +27,18 @@
     <label class="field">Slow over
       <input id="threshold" type="number" min="1" step="50" value="500"> ms
     </label>
+    <details class="popover" id="typeThresholds">
+      <summary>Per type</summary>
+      <div class="popover-body">
+        <label>XHR / Fetch <input id="threshold-xhr" type="number" min="1" step="50"> ms</label>
+        <label>Document <input id="threshold-document" type="number" min="1" step="50"> ms</label>
+        <label>Script <input id="threshold-script" type="number" min="1" step="50"> ms</label>
+        <label>CSS <input id="threshold-stylesheet" type="number" min="1" step="50"> ms</label>
+        <label>Image <input id="threshold-image" type="number" min="1" step="50"> ms</label>
+        <label>Font <input id="threshold-font" type="number" min="1" step="50"> ms</label>
+        <label>Other <input id="threshold-other" type="number" min="1" step="50"> ms</label>
+      </div>
+    </details>
     <label class="chip"><input id="onlySlow" type="checkbox"><span>Only slow</span></label>
     <label class="chip"><input id="onlyDupes" type="checkbox"><span>Only repeated</span></label>
     <label class="chip"><input id="preserve" type="checkbox"><span>Keep on navigation</span></label>

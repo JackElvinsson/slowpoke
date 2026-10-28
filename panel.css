@@ -102,6 +102,35 @@ button:hover { border-color: var(--accent); }
 
 .field { display: flex; align-items: center; gap: 4px; color: var(--muted); }
 
+.popover { position: relative; }
+.popover summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+}
+.popover summary::-webkit-details-marker { display: none; }
+.popover[open] summary { border-color: var(--accent); }
+.popover summary.active { color: var(--accent); }
+.popover-body {
+  position: absolute;
+  z-index: 2;
+  top: calc(100% + 4px);
+  left: 0;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 15%);
+  white-space: nowrap;
+}
+.popover-body label { display: flex; align-items: center; justify-content: flex-end; gap: 6px; color: var(--muted); }
+
 .chip { cursor: pointer; }
 .chip input { display: none; }
 .chip span {

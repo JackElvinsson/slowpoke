@@ -8,6 +8,8 @@ const PHASES = [
   ['receive', 'Downloading', '--ph-receive'],
 ];
 
+const TYPES = ['xhr', 'document', 'script', 'stylesheet', 'image', 'font', 'other'];
+
 const els = {
   summary: document.getElementById('summary'),
   list: document.getElementById('list'),
@@ -17,6 +19,8 @@ const els = {
   count: document.getElementById('count'),
   type: document.getElementById('type'),
   threshold: document.getElementById('threshold'),
+  typeThresholds: document.getElementById('typeThresholds'),
+  thresholds: Object.fromEntries(TYPES.map((type) => [type, document.getElementById(`threshold-${type}`)])),
   onlySlow: document.getElementById('onlySlow'),
   onlyDupes: document.getElementById('onlyDupes'),
   preserve: document.getElementById('preserve'),
@@ -28,7 +32,7 @@ const els = {
 const ROW_HEIGHT = 30;
 const OVERSCAN = 10;
 const SETTINGS_KEY = 'slowpoke:settings';
-const persisted = [els.type, els.threshold, els.onlySlow, els.onlyDupes, els.preserve, els.sort];
+const persisted = [els.type, els.threshold, ...Object.values(els.thresholds), els.onlySlow, els.onlyDupes, els.preserve, els.sort];
 
 let requests = [];
 let nextId = 1;
@@ -108,8 +112,27 @@ function toRequest(entry) {
   };
 }
 
+function globalThreshold() {
+  return Number(els.threshold.value || 500);
+}
+
+/** Returns the slow threshold for a request's type, or the global one when the type has none. */
+function thresholdFor(req) {
+  return Number(els.thresholds[req.type].value) || globalThreshold();
+}
+
 function isSlow(req) {
-  return req.time >= Number(els.threshold.value || 500);
+  return req.time >= thresholdFor(req);
+}
+
+/** Shows the global threshold as placeholder in the per-type inputs and marks the toggle when any override is set. */
+function renderThresholds() {
+  const inputs = Object.values(els.thresholds);
+  for (const input of inputs) input.placeholder = String(globalThreshold());
+  const overrides = inputs.filter((input) => input.value).length;
+  const summary = els.typeThresholds.querySelector('summary');
+  summary.textContent = overrides ? `Per type (${overrides})` : 'Per type';
+  summary.classList.toggle('active', overrides > 0);
 }
 
 function groupCounts() {
@@ -180,7 +203,7 @@ function renderRow(req, counts, minStart, span) {
   const count = counts.get(req.key);
   const slow = isSlow(req);
   const barClass = slow ? 'slow' : count > 1 ? 'dupe' : '';
-  const timeClass = slow ? 'slow' : req.time >= Number(els.threshold.value || 500) / 2 ? 'mid' : '';
+  const timeClass = slow ? 'slow' : req.time >= thresholdFor(req) / 2 ? 'mid' : '';
 
   return h(
     'div',
@@ -219,7 +242,7 @@ function renderRow(req, counts, minStart, span) {
 
 /** Builds a plain-text summary of a request, including its timing phases and repeated calls. */
 function buildSummary(req) {
-  const threshold = Number(els.threshold.value || 500);
+  const threshold = thresholdFor(req);
   const runs = requests.filter((r) => r.key === req.key).sort((a, b) => a.start - b.start);
   const lines = [
     `Request: ${req.method} ${req.url}`,
@@ -276,11 +299,12 @@ function buildListSummary(rows, counts) {
     els.onlyDupes.checked && 'only repeated',
   ].filter(Boolean);
   const total = rows.reduce((sum, req) => sum + req.time, 0);
+  const overrides = TYPES.filter((type) => els.thresholds[type].value).map((type) => `${type} ${Number(els.thresholds[type].value)} ms`);
 
   const lines = [
     `Network requests (showing ${rows.length} of ${requests.length}, ${formatMs(total)} total)`,
     `Filters: ${filters.length ? filters.join(', ') : 'none'}`,
-    `Slow threshold: ${Number(els.threshold.value || 500)} ms`,
+    `Slow threshold: ${globalThreshold()} ms${overrides.length ? ` (${overrides.join(', ')})` : ''}`,
     `Sorted by: ${sortLabels[els.sort.value]}`,
     '',
   ];
@@ -371,6 +395,7 @@ function render() {
   const counts = groupCounts();
   renderSummary(counts);
   renderHosts();
+  renderThresholds();
 
   const rows = visibleRequests(counts);
   const shownTime = rows.reduce((sum, req) => sum + req.time, 0);
@@ -472,9 +497,13 @@ els.clear.addEventListener('click', () => {
   queueRender();
 });
 
-for (const el of [els.search, els.host, els.type, els.threshold, els.onlySlow, els.onlyDupes, els.sort]) {
+for (const el of [els.search, els.host, els.type, els.threshold, ...Object.values(els.thresholds), els.onlySlow, els.onlyDupes, els.sort]) {
   el.addEventListener('input', queueRender);
 }
+
+document.addEventListener('click', (event) => {
+  if (!els.typeThresholds.contains(event.target)) els.typeThresholds.open = false;
+});
 
 els.list.addEventListener('scroll', queueRows);
 new ResizeObserver(queueRows).observe(els.list);
