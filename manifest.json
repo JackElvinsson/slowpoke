@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Slowpoke",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "See which requests are slow and which run multiple times, right inside DevTools.",
   "icons": {
     "16": "icons/icon-16.png",
