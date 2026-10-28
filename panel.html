@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Slowpoke</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header class="summary" id="summary"></header>
+
+  <div class="toolbar">
+    <input id="search" type="search" placeholder="Filter by URL..." autocomplete="off">
+    <select id="host">
+      <option value="">All hosts</option>
+    </select>
+    <select id="type">
+      <option value="">All types</option>
+      <option value="xhr">XHR / Fetch</option>
+      <option value="document">Document</option>
+      <option value="script">Script</option>
+      <option value="stylesheet">CSS</option>
+      <option value="image">Image</option>
+      <option value="font">Font</option>
+      <option value="other">Other</option>
+    </select>
+    <label class="field">Slow over
+      <input id="threshold" type="number" min="1" step="50" value="500"> ms
+    </label>
+    <label class="chip"><input id="onlySlow" type="checkbox"><span>Only slow</span></label>
+    <label class="chip"><input id="onlyDupes" type="checkbox"><span>Only repeated</span></label>
+    <label class="chip"><input id="preserve" type="checkbox"><span>Keep on navigation</span></label>
+    <select id="sort">
+      <option value="start">Sort: start time</option>
+      <option value="time">Sort: slowest first</option>
+      <option value="count">Sort: most repeated</option>
+    </select>
+    <button id="copyList" type="button">Copy list</button>
+    <button id="clear" type="button">Clear</button>
+    <span class="count" id="count"></span>
+  </div>
+
+  <main class="layout">
+    <section class="list" id="list"></section>
+    <aside class="detail" id="detail" hidden></aside>
+  </main>
+
+  <script src="panel.js"></script>
+</body>
+</html>
